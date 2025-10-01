@@ -4,5 +4,5 @@ numpy
 tonic
 pillow
 scikit-image
-astropy
 requests
+python-dotenv

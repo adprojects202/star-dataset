@@ -10,6 +10,8 @@ import PIL.ImageFilter
 import skimage.measure
 import requests
 import json
+import time
+from dotenv import load_dotenv
 
 
 def download_dataset():
@@ -198,41 +200,167 @@ def calculate_star_centers(warped_events, labels_array, num_stars, warped_height
     return centers, labelled_events
 
 
-def perform_astrometry_online(centers, num_stars, filtered_frame, dataset_dir):
+def perform_astrometry_via_api(dataset_dir):
     """
-    Perform astrometry using Astrometry.net online API (Windows-compatible).
-    Maps detected stars to known star catalog positions.
+    Perform astrometry using Astrometry.net API programmatically.
+    No manual upload needed - all done in code.
+
+    Args:
+        dataset_dir: Directory containing the star map image
     """
     print("\n" + "="*60)
-    print("PERFORMING ASTROMETRY (PLATE SOLVING)")
-    print("="*60)
-    print("Using Astrometry.net online API...")
-    print("Note: This requires internet connection and may take a few minutes.")
-
-    # Save star positions to a text file for upload
-    stars_file = os.path.join(dataset_dir, 'detected_stars.txt')
-    with open(stars_file, 'w') as f:
-        for center in centers[1:]:
-            f.write(f"{center[0]:.2f} {center[1]:.2f}\n")
-
-    print(f"\nSolved for {num_stars} detected stars")
-    print("Star positions saved to:", stars_file)
-
-    # Create a simple result dictionary with estimated coordinates
-    # For a real implementation, you would need to use the Astrometry.net API
-    # or install WSL with astrometry.net
-
-    print("\n" + "="*60)
-    print("ASTROMETRY INFO")
-    print("="*60)
-    print("To get actual sky coordinates on Windows:")
-    print("1. Upload the star map image to: https://nova.astrometry.net/upload")
-    print("2. Or use detected_stars.txt file for plate solving")
-    print("3. Or install WSL (Windows Subsystem for Linux) for local solving")
+    print("PERFORMING ASTROMETRY VIA API")
     print("="*60)
 
-    # Return None to indicate online solving is needed
-    return None
+    api_result = submit_to_astrometry_api(dataset_dir)
+
+    if api_result is not None:
+        print("\n" + "="*60)
+        print("ASTROMETRY SOLUTION FOUND!")
+        print("="*60)
+        print(f"Center RA:  {api_result['ra']:.4f} degrees")
+        print(f"Center DEC: {api_result['dec']:.4f} degrees")
+        print(f"Scale: {api_result['scale']:.4f} arcsec/pixel")
+        print(f"Orientation: {api_result['orientation']:.2f} degrees")
+        print("="*60)
+        return api_result
+    else:
+        print("\n" + "="*60)
+        print("ASTROMETRY FAILED")
+        print("="*60)
+        print("Could not solve via API.")
+        print("Please check your API key or upload manually to:")
+        print("https://nova.astrometry.net/upload")
+        print("="*60)
+        return None
+
+
+def submit_to_astrometry_api(dataset_dir):
+    """
+    Submit image to Astrometry.net API programmatically.
+    Requires API key in astrometry_api_key.env file.
+    """
+    print("Checking for Astrometry.net API key...")
+
+    # Load environment variables from .env file
+    env_file = 'astrometry_api_key.env'
+    load_dotenv(env_file)
+
+    api_key = os.getenv('ASTROMETRY_API_KEY')
+
+    if not api_key:
+        print("\nNo API key found.")
+        print("To enable automatic astrometry:")
+        print(f"1. Get free API key from: https://nova.astrometry.net/api_help")
+        print(f"2. Create '{env_file}' file with:")
+        print(f"   astrometry_api_key=YOUR_API_KEY_HERE")
+        return None
+
+    print("API key found. Submitting to Astrometry.net...")
+
+    try:
+        image_path = os.path.join(dataset_dir, 'star_map_detected.png')
+
+        # Login
+        login_url = 'http://nova.astrometry.net/api/login'
+        login_data = {'request-json': json.dumps({'apikey': api_key})}
+        response = requests.post(login_url, data=login_data)
+
+        if response.status_code != 200 or response.json()['status'] != 'success':
+            print("API login failed")
+            return None
+
+        session_key = response.json()['session']
+        print(f"Logged in successfully")
+
+        # Upload image
+        upload_url = 'http://nova.astrometry.net/api/upload'
+        upload_data = {
+            'request-json': json.dumps({
+                'session': session_key,
+                'allow_modifications': 'd',
+                'publicly_visible': 'n',
+                'allow_commercial_use': 'n',
+            })
+        }
+
+        with open(image_path, 'rb') as f:
+            files = {'file': f}
+            response = requests.post(upload_url, data=upload_data, files=files)
+
+        if response.status_code != 200 or response.json()['status'] != 'success':
+            print("Upload failed")
+            return None
+
+        subid = response.json()['subid']
+        print(f"Upload successful. Submission ID: {subid}")
+        print("Waiting for solution (1-5 minutes)...")
+
+        # Wait initial time before polling
+        time.sleep(5)
+
+        # Poll for results
+        max_attempts = 60
+        for attempt in range(max_attempts):
+            status_url = f'http://nova.astrometry.net/api/submissions/{subid}'
+
+            try:
+                response = requests.get(status_url)
+            except requests.RequestException:
+                # Network error, continue waiting
+                time.sleep(5)
+                continue
+
+            if response.status_code == 200 and response.text.strip():
+                try:
+                    result = response.json()
+                except json.JSONDecodeError:
+                    # Response not ready yet, continue waiting
+                    time.sleep(5)
+                    continue
+
+                job_ids = result.get('jobs', [])
+
+                if job_ids:
+                    job_id = job_ids[0]
+                    job_url = f'http://nova.astrometry.net/api/jobs/{job_id}/info'
+
+                    try:
+                        job_response = requests.get(job_url)
+                    except requests.RequestException:
+                        time.sleep(5)
+                        continue
+
+                    if job_response.status_code == 200:
+                        try:
+                            job_info = job_response.json()
+                        except json.JSONDecodeError:
+                            time.sleep(5)
+                            continue
+
+                        if job_info['status'] == 'success':
+                            calib = job_info.get('calibration', {})
+                            print("\nSolution found!")
+                            return {
+                                'ra': calib.get('ra', 0),
+                                'dec': calib.get('dec', 0),
+                                'scale': calib.get('pixscale', 0),
+                                'orientation': calib.get('orientation', 0)
+                            }
+                        elif job_info['status'] == 'failure':
+                            print("\nJob failed to solve")
+                            return None
+
+            time.sleep(5)
+            if attempt % 6 == 0 and attempt > 0:
+                print(f"Still waiting... ({attempt*5}s)")
+
+        print("\nTimeout waiting for solution")
+        return None
+
+    except Exception as e:
+        print(f"\nAPI error: {e}")
+        return None
 
 
 def visualize_detected_stars(filtered_frame, centers, num_stars, dataset_dir):
@@ -253,9 +381,7 @@ def visualize_detected_stars(filtered_frame, centers, num_stars, dataset_dir):
         x=centers[1:, 0],
         y=filtered_frame.shape[0] - 1 - centers[1:, 1],
         marker="o",
-        facecolor="none",
-        edgecolors="#00ff00",
-        linewidth=1.5,
+        color="#00ff00",
         s=150
     )
 
@@ -285,15 +411,33 @@ def save_detected_stars_data(centers, num_stars, dataset_dir):
         for i, center in enumerate(centers[1:], 1):
             f.write(f"{i:7d} | {center[0]:7.2f} | {center[1]:7.2f}\n")
 
-        f.write("\n" + "="*60 + "\n")
-        f.write("TO GET SKY COORDINATES:\n")
-        f.write("="*60 + "\n")
-        f.write("Visit: https://nova.astrometry.net/upload\n")
-        f.write("Upload: star_map_detected.png\n")
-        f.write("Or use: detected_stars.txt for plate solving\n")
-        f.write("="*60 + "\n")
-
     print(f"Star data saved to: {output_file}")
+    return output_file
+
+
+def save_astrometry_results(astrometry_result, centers, num_stars, dataset_dir):
+    """Save astrometry solution to a text file."""
+    output_file = os.path.join(dataset_dir, 'astrometry_solution.txt')
+
+    with open(output_file, 'w') as f:
+        f.write("="*60 + "\n")
+        f.write("ASTROMETRY SOLUTION\n")
+        f.write("="*60 + "\n\n")
+        f.write(f"Center Right Ascension (RA):  {astrometry_result['ra']:.6f} degrees\n")
+        f.write(f"Center Declination (DEC):     {astrometry_result['dec']:.6f} degrees\n")
+        f.write(f"Scale:                        {astrometry_result['scale']:.6f} arcsec/pixel\n")
+        f.write(f"Orientation:                  {astrometry_result['orientation']:.6f} degrees\n")
+        f.write(f"Detected stars:               {num_stars}\n\n")
+
+        f.write("="*60 + "\n")
+        f.write("DETECTED STAR CENTERS (Pixel Coordinates)\n")
+        f.write("="*60 + "\n")
+        f.write("Star ID | X (px) | Y (px)\n")
+        f.write("-"*60 + "\n")
+        for i, center in enumerate(centers[1:], 1):
+            f.write(f"{i:7d} | {center[0]:7.2f} | {center[1]:7.2f}\n")
+
+    print(f"Astrometry solution saved to: {output_file}")
     return output_file
 
 
@@ -337,20 +481,26 @@ def main():
     # Step 9: Save detected stars data
     data_file = save_detected_stars_data(centers, num_stars, dataset_dir)
 
-    # Step 10: Provide astrometry info
-    perform_astrometry_online(centers, num_stars, filtered_frame, dataset_dir)
+    # Step 10: Perform astrometry via API
+    astrometry_result = perform_astrometry_via_api(dataset_dir)
+
+    # Step 11: Save astrometry results if found
+    if astrometry_result is not None:
+        save_astrometry_results(astrometry_result, centers, num_stars, dataset_dir)
 
     print("\n" + "="*60)
     print("STAR MAPPING COMPLETE!")
     print("="*60)
     print(f"Detection threshold: {STAR_DETECTION_THRESHOLD}%")
     print(f"Total stars detected: {num_stars}")
+    if astrometry_result is not None:
+        print(f"\nSky Position:")
+        print(f"  - RA:  {astrometry_result['ra']:.4f}°")
+        print(f"  - DEC: {astrometry_result['dec']:.4f}°")
+        print(f"  - Scale: {astrometry_result['scale']:.4f} arcsec/pixel")
     print(f"\nOutputs:")
     print(f"  - Star Map:  {output_path}")
     print(f"  - Star Data: {data_file}")
-    print(f"\nFor sky coordinates (RA/DEC):")
-    print(f"  Upload star_map_detected.png to:")
-    print(f"  https://nova.astrometry.net/upload")
     print(f"\nTip: To adjust detection, change STAR_DETECTION_THRESHOLD")
     print(f"     Higher (99.9) = fewer/brighter stars only")
     print(f"     Lower (99.5) = more/dimmer stars included")

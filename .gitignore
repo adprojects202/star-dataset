@@ -2,3 +2,4 @@
 /*.es
 astrometry_cache
 dataset
+astrometry_api_key.env
