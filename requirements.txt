@@ -2,3 +2,5 @@ event_stream
 matplotlib
 numpy
 tonic
+pillow
+scikit-image
