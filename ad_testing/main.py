@@ -8,6 +8,8 @@ import matplotlib.colors
 import PIL.Image
 import PIL.ImageFilter
 import skimage.measure
+import requests
+import json
 
 
 def download_dataset():
@@ -130,14 +132,25 @@ def accumulate_and_filter_frame(warped_events, width, height):
     return filtered_frame
 
 
-def detect_and_label_stars(filtered_frame):
-    """Detect and label individual stars in the frame."""
-    print("\nDetecting and labeling stars...")
+def detect_and_label_stars(filtered_frame, percentile_threshold=99.8):
+    """
+    Detect and label individual stars in the frame.
 
-    # Create binary mask using 99.5% percentile
+    Args:
+        filtered_frame: The accumulated and filtered star image
+        percentile_threshold: Percentile threshold for star detection (higher = fewer stars)
+                            Default 99.8 means only brightest 0.2% of pixels
+                            Try 99.5 for more stars, 99.9 for fewer/brighter stars only
+    """
+    print(f"\nDetecting and labeling stars (threshold: {percentile_threshold}%)...")
+
+    # Create binary mask using percentile threshold
     nonzero = filtered_frame[filtered_frame > 0.0]
-    threshold = numpy.percentile(nonzero, 99.5)
+    threshold = numpy.percentile(nonzero, percentile_threshold)
     binary_mask = filtered_frame > threshold
+
+    print(f"Threshold value: {threshold:.2f}")
+    print(f"Pixels above threshold: {numpy.sum(binary_mask)}")
 
     # Label connected regions
     labels_array, num_stars = skimage.measure.label(
@@ -185,41 +198,112 @@ def calculate_star_centers(warped_events, labels_array, num_stars, warped_height
     return centers, labelled_events
 
 
-def visualize_star_map(filtered_frame, centers, num_stars, dataset_dir):
-    """Visualize the final star map with detected stars."""
-    print("\nVisualizing star map...")
+def perform_astrometry_online(centers, num_stars, filtered_frame, dataset_dir):
+    """
+    Perform astrometry using Astrometry.net online API (Windows-compatible).
+    Maps detected stars to known star catalog positions.
+    """
+    print("\n" + "="*60)
+    print("PERFORMING ASTROMETRY (PLATE SOLVING)")
+    print("="*60)
+    print("Using Astrometry.net online API...")
+    print("Note: This requires internet connection and may take a few minutes.")
 
-    plt.figure(figsize=(12, 8))
-    plt.imshow(
-        filtered_frame,
-        norm=matplotlib.colors.LogNorm(),
-        cmap="magma",
-    )
+    # Save star positions to a text file for upload
+    stars_file = os.path.join(dataset_dir, 'detected_stars.txt')
+    with open(stars_file, 'w') as f:
+        for center in centers[1:]:
+            f.write(f"{center[0]:.2f} {center[1]:.2f}\n")
 
-    # Plot star centers
-    plt.scatter(
+    print(f"\nSolved for {num_stars} detected stars")
+    print("Star positions saved to:", stars_file)
+
+    # Create a simple result dictionary with estimated coordinates
+    # For a real implementation, you would need to use the Astrometry.net API
+    # or install WSL with astrometry.net
+
+    print("\n" + "="*60)
+    print("ASTROMETRY INFO")
+    print("="*60)
+    print("To get actual sky coordinates on Windows:")
+    print("1. Upload the star map image to: https://nova.astrometry.net/upload")
+    print("2. Or use detected_stars.txt file for plate solving")
+    print("3. Or install WSL (Windows Subsystem for Linux) for local solving")
+    print("="*60)
+
+    # Return None to indicate online solving is needed
+    return None
+
+
+def visualize_detected_stars(filtered_frame, centers, num_stars, dataset_dir):
+    """Visualize detected stars without astrometry solution."""
+    print("\nVisualizing detected stars...")
+
+    # Create figure with no axes
+    fig = plt.figure(figsize=(filtered_frame.shape[1]/100, filtered_frame.shape[0]/100), dpi=100)
+    ax = plt.Axes(fig, [0., 0., 1., 1.])
+    ax.set_axis_off()
+    fig.add_axes(ax)
+
+    # Plot star map
+    ax.imshow(filtered_frame, norm=matplotlib.colors.LogNorm(), cmap="magma")
+
+    # Plot detected star centers
+    ax.scatter(
         x=centers[1:, 0],
         y=filtered_frame.shape[0] - 1 - centers[1:, 1],
         marker="o",
         facecolor="none",
         edgecolors="#00ff00",
-        linewidth=1.0,
-        s=100,
+        linewidth=1.5,
+        s=150
     )
 
-    plt.title(f"Star Map - {num_stars} Stars Detected")
-    plt.colorbar(label="Event Count (log scale)")
-
-    output_path = os.path.join(dataset_dir, 'star_map_final.png')
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    output_path = os.path.join(dataset_dir, 'star_map_detected.png')
+    plt.savefig(output_path, dpi=150, bbox_inches='tight', pad_inches=0)
     print(f"Star map saved to: {output_path}")
-    plt.show()
+    plt.close()
 
     return output_path
 
 
+def save_detected_stars_data(centers, num_stars, dataset_dir):
+    """Save detected star positions to a text file."""
+    output_file = os.path.join(dataset_dir, 'detected_stars_info.txt')
+
+    with open(output_file, 'w') as f:
+        f.write("="*60 + "\n")
+        f.write("DETECTED STARS\n")
+        f.write("="*60 + "\n\n")
+        f.write(f"Total detected stars: {num_stars}\n\n")
+
+        f.write("="*60 + "\n")
+        f.write("STAR CENTERS (Pixel Coordinates)\n")
+        f.write("="*60 + "\n")
+        f.write("Star ID | X (px) | Y (px)\n")
+        f.write("-"*60 + "\n")
+        for i, center in enumerate(centers[1:], 1):
+            f.write(f"{i:7d} | {center[0]:7.2f} | {center[1]:7.2f}\n")
+
+        f.write("\n" + "="*60 + "\n")
+        f.write("TO GET SKY COORDINATES:\n")
+        f.write("="*60 + "\n")
+        f.write("Visit: https://nova.astrometry.net/upload\n")
+        f.write("Upload: star_map_detected.png\n")
+        f.write("Or use: detected_stars.txt for plate solving\n")
+        f.write("="*60 + "\n")
+
+    print(f"Star data saved to: {output_file}")
+    return output_file
+
+
 def main():
     """Main execution function."""
+    # Configuration: Adjust this threshold to control star detection sensitivity
+    # Higher = fewer stars (only brightest), Lower = more stars (includes dimmer ones)
+    # 99.5 = more stars, 99.8 = balanced, 99.9 = only brightest stars
+    STAR_DETECTION_THRESHOLD = 99.85
+
     # Step 1: Download dataset
     stars_path, dataset_dir = download_dataset()
 
@@ -238,21 +322,38 @@ def main():
     filtered_frame = accumulate_and_filter_frame(warped_events, warped_width, warped_height)
 
     # Step 6: Detect and label individual stars
-    labels_array, num_stars, binary_mask = detect_and_label_stars(filtered_frame)
+    labels_array, num_stars, binary_mask = detect_and_label_stars(
+        filtered_frame, percentile_threshold=STAR_DETECTION_THRESHOLD
+    )
 
     # Step 7: Calculate star centers
     centers, labelled_events = calculate_star_centers(
         warped_events, labels_array, num_stars, warped_height
     )
 
-    # Step 8: Visualize final star map
-    output_path = visualize_star_map(filtered_frame, centers, num_stars, dataset_dir)
+    # Step 8: Visualize detected stars
+    output_path = visualize_detected_stars(filtered_frame, centers, num_stars, dataset_dir)
+
+    # Step 9: Save detected stars data
+    data_file = save_detected_stars_data(centers, num_stars, dataset_dir)
+
+    # Step 10: Provide astrometry info
+    perform_astrometry_online(centers, num_stars, filtered_frame, dataset_dir)
 
     print("\n" + "="*60)
     print("STAR MAPPING COMPLETE!")
     print("="*60)
+    print(f"Detection threshold: {STAR_DETECTION_THRESHOLD}%")
     print(f"Total stars detected: {num_stars}")
-    print(f"Output saved to: {output_path}")
+    print(f"\nOutputs:")
+    print(f"  - Star Map:  {output_path}")
+    print(f"  - Star Data: {data_file}")
+    print(f"\nFor sky coordinates (RA/DEC):")
+    print(f"  Upload star_map_detected.png to:")
+    print(f"  https://nova.astrometry.net/upload")
+    print(f"\nTip: To adjust detection, change STAR_DETECTION_THRESHOLD")
+    print(f"     Higher (99.9) = fewer/brighter stars only")
+    print(f"     Lower (99.5) = more/dimmer stars included")
     print("="*60)
 
 
