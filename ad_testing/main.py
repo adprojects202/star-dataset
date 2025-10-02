@@ -18,7 +18,7 @@ def download_dataset():
     """Download the star dataset from GitHub to the dataset folder."""
     dataset_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'dataset')
     os.makedirs(dataset_dir, exist_ok=True)
-    stars_pattern = "stars.es"
+    stars_pattern = "stars_cut.es"
     stars_path = os.path.join(dataset_dir, stars_pattern)
 
     print("Checking for star dataset...")
@@ -284,7 +284,7 @@ def submit_to_astrometry_api(dataset_dir):
     print("API key found. Submitting to Astrometry.net...")
 
     try:
-        image_path = os.path.join(dataset_dir, 'star_map_detected.png')
+        image_path = os.path.join(dataset_dir, 'star_map_for_api.png')
 
         # Login
         login_url = 'http://nova.astrometry.net/api/login'
@@ -414,6 +414,27 @@ def visualize_detected_stars(filtered_frame, centers, num_stars, dataset_dir):
     output_path = os.path.join(dataset_dir, 'star_map_detected.png')
     plt.savefig(output_path, dpi=150, bbox_inches='tight', pad_inches=0)
     print(f"Star map saved to: {output_path}")
+    plt.close()
+
+    return output_path
+
+
+def save_binary_image_for_api(filtered_frame, dataset_dir):
+    """Save a clean binary accumulated image for Astrometry.net API submission."""
+    print("\nSaving binary image for API submission...")
+
+    # Create clean image without any overlays
+    fig = plt.figure(figsize=(filtered_frame.shape[1]/100, filtered_frame.shape[0]/100), dpi=100)
+    ax = plt.Axes(fig, [0., 0., 1., 1.])
+    ax.set_axis_off()
+    fig.add_axes(ax)
+
+    # Plot just the accumulated frame
+    ax.imshow(filtered_frame, norm=matplotlib.colors.LogNorm(), cmap="gray")
+
+    output_path = os.path.join(dataset_dir, 'star_map_for_api.png')
+    plt.savefig(output_path, dpi=150, bbox_inches='tight', pad_inches=0)
+    print(f"API image saved to: {output_path}")
     plt.close()
 
     return output_path
@@ -570,19 +591,22 @@ def main():
         warped_events, labels_array, num_stars, warped_height
     )
 
-    # Step 8: Visualize detected stars
+    # Step 8: Save binary image for API submission
+    api_image_path = save_binary_image_for_api(filtered_frame, dataset_dir)
+
+    # Step 9: Visualize detected stars
     output_path = visualize_detected_stars(filtered_frame, centers, num_stars, dataset_dir)
 
-    # Step 9: Save detected stars data
+    # Step 10: Save detected stars data
     data_file = save_detected_stars_data(centers, num_stars, dataset_dir)
 
-    # Step 10: Perform astrometry via API
+    # Step 11: Perform astrometry via API
     astrometry_result = perform_astrometry_via_api(dataset_dir)
 
-    # Step 11: Save astrometry results if found
+    # Step 12: Save astrometry results if found
     if astrometry_result is not None:
         save_astrometry_results(astrometry_result, centers, num_stars, dataset_dir)
-        # Step 12: Generate HTML visualization
+        # Step 13: Generate HTML visualization
         generate_html_visualization(astrometry_result, centers, num_stars, filtered_frame.shape, dataset_dir)
 
     print("\n" + "="*60)
