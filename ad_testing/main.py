@@ -18,13 +18,13 @@ def download_dataset():
     """Download the star dataset from GitHub to the dataset folder."""
     dataset_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'dataset')
     os.makedirs(dataset_dir, exist_ok=True)
-
-    stars_path = os.path.join(dataset_dir, 'stars_cut.es')
+    stars_pattern = "stars.es"
+    stars_path = os.path.join(dataset_dir, stars_pattern)
 
     print("Checking for star dataset...")
     if not os.path.exists(stars_path):
         print("Downloading star dataset...")
-        url = "https://github.com/neuromorphicsystems/tutorials/raw/main/data/stars_cut.es"
+        url = f"https://github.com/neuromorphicsystems/tutorials/raw/main/data/{stars_pattern}"
         stars_path, _ = urllib.request.urlretrieve(url, stars_path)
         print(f"Downloaded dataset to: {stars_path}")
     else:
@@ -47,6 +47,31 @@ def load_event_stream(stars_path):
     events = events.view(dtype=events.dtype.descr[:3] + [(('on', 'p'), '?')])
 
     return events, width, height
+
+
+def save_basic_star_map(events, width, height, dataset_dir):
+    """Save basic accumulated star map before any corrections."""
+    print("\nGenerating basic star map (raw event accumulation)...")
+
+    image_transform = transforms.ToImage(sensor_size=(width, height, 2))
+    accumulated_frame = image_transform(events)
+    accumulated_frame = numpy.flip(accumulated_frame.sum(0), axis=0)
+
+    plt.figure(figsize=(12, 8))
+    plt.imshow(
+        accumulated_frame,
+        norm=matplotlib.colors.LogNorm(vmax=numpy.percentile(accumulated_frame, 99.9)),
+        cmap="magma"
+    )
+    plt.title("Raw Star Map - Before Corrections")
+    plt.colorbar(label="Event Count (log scale)")
+
+    output_path = os.path.join(dataset_dir, 'star_map_basic_raw.png')
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    print(f"Basic star map saved to: {output_path}")
+    plt.close()
+
+    return output_path
 
 
 def filter_noise(events, width, height, time_window=10000):
@@ -316,6 +341,7 @@ def submit_to_astrometry_api(dataset_dir):
                     result = response.json()
                 except json.JSONDecodeError:
                     # Response not ready yet, continue waiting
+                    print("Waiting for response...")
                     time.sleep(5)
                     continue
 
@@ -441,18 +467,87 @@ def save_astrometry_results(astrometry_result, centers, num_stars, dataset_dir):
     return output_file
 
 
+def generate_html_visualization(astrometry_result, centers, num_stars, frame_shape, dataset_dir):
+    """Generate interactive HTML visualization of the astrometry solution."""
+    print("\nGenerating interactive HTML visualization...")
+
+    # Read template file with UTF-8 encoding
+    template_path = os.path.join(os.path.dirname(__file__), 'visualization_template.html')
+    with open(template_path, 'r', encoding='utf-8') as f:
+        html_template = f.read()
+
+    # Convert RA/DEC to HMS/DMS format
+    ra_deg = astrometry_result['ra']
+    dec_deg = astrometry_result['dec']
+
+    ra_hours = int(ra_deg / 15)
+    ra_minutes = int((ra_deg / 15 - ra_hours) * 60)
+    ra_seconds = ((ra_deg / 15 - ra_hours) * 60 - ra_minutes) * 60
+
+    dec_sign = '-' if dec_deg < 0 else '+'
+    dec_abs = abs(dec_deg)
+    dec_degrees = int(dec_abs)
+    dec_arcmin = int((dec_abs - dec_degrees) * 60)
+    dec_arcsec = ((dec_abs - dec_degrees) * 60 - dec_arcmin) * 60
+
+    # Calculate field of view
+    fov_x = (frame_shape[1] * astrometry_result['scale']) / 3600  # degrees
+    fov_y = (frame_shape[0] * astrometry_result['scale']) / 3600  # degrees
+
+    # Generate star positions JavaScript array
+    star_data = []
+    for i, center in enumerate(centers[1:], 1):
+        star_data.append(f"{{id: {i}, x: {center[0]:.2f}, y: {center[1]:.2f}}}")
+    stars_js = ",\n            ".join(star_data)
+
+    # Replace placeholders in template
+    replacements = {
+        '{{RA_HMS}}': f'{ra_hours:02d}h {ra_minutes:02d}m {ra_seconds:04.1f}s',
+        '{{RA_DEG}}': f'{ra_deg:.3f}°',
+        '{{DEC_DMS}}': f'{dec_sign}{dec_degrees:02d}° {dec_arcmin:02d}\' {dec_arcsec:04.1f}"',
+        '{{DEC_DEG}}': f'{dec_deg:.3f}°',
+        '{{SCALE}}': f'{astrometry_result["scale"]:.2f} "/pixel',
+        '{{ORIENTATION}}': f'{astrometry_result["orientation"]:.1f}°',
+        '{{FOV}}': f'{fov_x:.2f}° × {fov_y:.2f}°',
+        '{{NUM_STARS}}': str(num_stars),
+        '{{ROLL}}': f'{astrometry_result["orientation"]:.1f}°',
+        '{{PITCH}}': f'{dec_deg:.1f}°',
+        '{{YAW}}': f'{ra_deg:.1f}°',
+        '{{STARS_DATA}}': stars_js,
+        '{{ORIENTATION_VALUE}}': f'{astrometry_result["orientation"]:.1f}',
+        '{{FRAME_WIDTH}}': str(frame_shape[1]),
+        '{{FRAME_HEIGHT}}': str(frame_shape[0]),
+        '{{DEC_VALUE}}': f'{dec_deg:.1f}'
+    }
+
+    html_content = html_template
+    for placeholder, value in replacements.items():
+        html_content = html_content.replace(placeholder, value)
+
+    output_file = os.path.join(dataset_dir, 'star_tracker_visualization.html')
+    with open(output_file, 'w', encoding='utf-8') as f:
+        f.write(html_content)
+
+    print(f"HTML visualization saved to: {output_file}")
+    print(f"Open in browser to view interactive 3D visualization!")
+    return output_file
+
+
 def main():
     """Main execution function."""
     # Configuration: Adjust this threshold to control star detection sensitivity
     # Higher = fewer stars (only brightest), Lower = more stars (includes dimmer ones)
     # 99.5 = more stars, 99.8 = balanced, 99.9 = only brightest stars
-    STAR_DETECTION_THRESHOLD = 99.85
+    STAR_DETECTION_THRESHOLD = 99.90
 
     # Step 1: Download dataset
     stars_path, dataset_dir = download_dataset()
 
     # Step 2: Load event stream
     events, width, height = load_event_stream(stars_path)
+
+    # Step 2.5: Save basic star map before corrections
+    save_basic_star_map(events, width, height, dataset_dir)
 
     # Step 3: Filter noise from events
     filtered_events = filter_noise(events, width, height, time_window=10000)
@@ -487,6 +582,8 @@ def main():
     # Step 11: Save astrometry results if found
     if astrometry_result is not None:
         save_astrometry_results(astrometry_result, centers, num_stars, dataset_dir)
+        # Step 12: Generate HTML visualization
+        generate_html_visualization(astrometry_result, centers, num_stars, filtered_frame.shape, dataset_dir)
 
     print("\n" + "="*60)
     print("STAR MAPPING COMPLETE!")
