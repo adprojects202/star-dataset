@@ -1,0 +1,7 @@
+flask==3.0.0
+astrometry
+numpy
+opencv-python-headless
+event-stream
+pillow
+gunicorn

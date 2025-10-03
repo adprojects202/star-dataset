@@ -268,7 +268,7 @@ def submit_to_astrometry_api(dataset_dir):
     print("Checking for Astrometry.net API key...")
 
     # Load environment variables from .env file
-    env_file = 'astrometry_api_key.env'
+    env_file = 'ad_testing\\astrometry_api_key.env'
     load_dotenv(env_file)
 
     api_key = os.getenv('ASTROMETRY_API_KEY')

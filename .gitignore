@@ -2,4 +2,5 @@
 /*.es
 astrometry_cache
 dataset
+.claude
 astrometry_api_key.env
