@@ -11,10 +11,7 @@ csv.field_size_limit(10000000)
 
 def load_csv_data(csv_path):
     """
-    Load astrometry results from CSV file.
-
-    Returns:
-        List of frame data dictionaries
+    Load astrometry results from CSV file with frame dimensions.
     """
     print(f"Loading data from: {csv_path}")
 
@@ -23,7 +20,6 @@ def load_csv_data(csv_path):
     with open(csv_path, 'r') as csvfile:
         reader = csv.DictReader(csvfile)
         for row in reader:
-            # Only process rows where status is 'success'
             if row['status'].strip().lower() == 'success':
                 try:
                     stars_data = json.loads(row['stars_data'])
@@ -32,17 +28,19 @@ def load_csv_data(csv_path):
                         'frame_number': int(row['frame_number']),
                         'num_stars': int(row['num_stars']),
                         'stars': stars_data,
+                        'frame_width': int(row['frame_width']),
+                        'frame_height': int(row['frame_height']),
                         'ra': float(row['ra_deg']),
                         'dec': float(row['dec_deg']),
                         'scale': float(row['scale_arcsec_per_pixel']),
                         'orientation': float(row['orientation_deg']) if row['orientation_deg'] else 0,
                         'solve_time': float(row['solve_time_seconds']) if row.get('solve_time_seconds') else 0
                     })
-                except (ValueError, json.JSONDecodeError) as e:
+                except (ValueError, json.JSONDecodeError, KeyError) as e:
                     print(f"Skipping frame {row['frame_number']}: {e}")
                     continue
             else:
-                print(f"Skipping frame {row['frame_number']}: status is '{row['status']}', not 'success'")
+                print(f"Skipping frame {row['frame_number']}: status is '{row['status']}'")
 
     print(f"Loaded {len(frames_data)} successful frames")
     return frames_data
@@ -51,10 +49,7 @@ def load_csv_data(csv_path):
 def create_html_animation(frames_data, output_path='animation.html'):
     """
     Create HTML animated visualization cycling through frames.
-
-    Args:
-        frames_data: List of frame data dictionaries
-        output_path: Path to save HTML file
+    Stars are in pixel space (sensor optical frame).
     """
     if not frames_data:
         print("No data to visualize")
@@ -203,6 +198,10 @@ def create_html_animation(frames_data, output_path='animation.html'):
                         <span class="label">Stars Detected:</span>
                         <span class="value" id="num-stars">0</span>
                     </div>
+                    <div class="data-row">
+                        <span class="label">Frame Size:</span>
+                        <span class="value" id="frame-size">0x0</span>
+                    </div>
                 </div>
 
                 <div class="info-section">
@@ -241,16 +240,20 @@ def create_html_animation(frames_data, output_path='animation.html'):
 
         const canvas = document.getElementById('starField');
         const ctx = canvas.getContext('2d');
-        
-        // Actual sensor resolution
-        const SENSOR_WIDTH = 1280;
-        const SENSOR_HEIGHT = 720;
 
         document.getElementById('totalFrames').textContent = framesData.length;
 
         function drawStarField(frameData) {{
             ctx.fillStyle = '#000';
             ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Use frame dimensions from data
+            const frameWidth = frameData.frame_width;
+            const frameHeight = frameData.frame_height;
+            
+            // Calculate scaling to fit frame into canvas
+            const scaleX = canvas.width / frameWidth;
+            const scaleY = canvas.height / frameHeight;
 
             // Draw grid
             ctx.strokeStyle = 'rgba(0, 255, 0, 0.2)';
@@ -301,25 +304,20 @@ def create_html_animation(frames_data, output_path='animation.html'):
                 cy + Math.sin(northAngle) * (northLength + 15)
             );
 
-            // Convert stars data and calculate proper scaling
+            // Get stars (format: [id, x_pixel, y_pixel])
             const stars = frameData.stars;
             
             if (stars.length === 0) return;
 
-            // Convert star data format from [id, x, y] to {{id, x, y}}
             const starsFormatted = stars.map(star => ({{
                 id: star[0],
-                x: star[1],
-                y: star[2]
+                x: star[1],  // Already in pixel space
+                y: star[2]   // Already in pixel space
             }}));
 
-            // Scale based on sensor resolution to canvas size
-            const scaleX = canvas.width / SENSOR_WIDTH;
-            const scaleY = canvas.height / SENSOR_HEIGHT;
-
-            // Draw connections between nearby stars first (so they appear behind stars)
-            ctx.strokeStyle = 'rgba(0, 255, 0, 0.3)';
-            ctx.lineWidth = 1;
+            // Draw connections between nearby stars
+            ctx.strokeStyle = 'rgba(0, 240, 0, 0.2)';
+            ctx.lineWidth = 0.5;
             for (let i = 0; i < starsFormatted.length; i++) {{
                 for (let j = i + 1; j < starsFormatted.length; j++) {{
                     const x1 = starsFormatted[i].x * scaleX;
@@ -338,6 +336,7 @@ def create_html_animation(frames_data, output_path='animation.html'):
 
             // Draw stars
             starsFormatted.forEach(star => {{
+                // Scale pixel coordinates to canvas
                 const x = star.x * scaleX;
                 const y = star.y * scaleY;
 
@@ -399,6 +398,7 @@ def create_html_animation(frames_data, output_path='animation.html'):
             document.getElementById('scale').textContent = frameData.scale.toFixed(2) + ' arcsec/px';
             document.getElementById('orientation').textContent = frameData.orientation.toFixed(1) + '°';
             document.getElementById('num-stars').textContent = frameData.num_stars;
+            document.getElementById('frame-size').textContent = frameData.frame_width + 'x' + frameData.frame_height;
             document.getElementById('roll').textContent = frameData.orientation.toFixed(1) + '°';
             document.getElementById('pitch').textContent = frameData.dec.toFixed(1) + '°';
             document.getElementById('yaw').textContent = frameData.ra.toFixed(1) + '°';

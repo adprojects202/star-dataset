@@ -101,11 +101,6 @@ def split_events_into_time_windows(events, window_duration_ms=1000, overlap_ms=5
 def estimate_local_motion(window_events, num_blocks=10, max_velocity=50.0):
     """
     Estimate motion within a single time window with safety limits.
-    
-    Args:
-        window_events: Events in the window
-        num_blocks: Number of blocks to divide time into
-        max_velocity: Maximum allowed velocity in px/s (safety limit)
     """
     if len(window_events) < 100:
         return 0.0, 0.0
@@ -114,7 +109,7 @@ def estimate_local_motion(window_events, num_blocks=10, max_velocity=50.0):
     t_end = window_events["t"][-1]
     duration_us = t_end - t_start
     
-    if duration_us < 10000:  # Less than 10ms - too short
+    if duration_us < 10000:
         return 0.0, 0.0
     
     block_duration = duration_us // num_blocks
@@ -143,11 +138,9 @@ def estimate_local_motion(window_events, num_blocks=10, max_velocity=50.0):
     times_array = numpy.array(times)
     times_normalized = (times_array - times_array[0]) / 1e6
     
-    # Fit linear motion
     vx = numpy.polyfit(times_normalized, centroids_x, 1)[0]
     vy = numpy.polyfit(times_normalized, centroids_y, 1)[0]
     
-    # Apply safety limits
     vx = numpy.clip(vx, -max_velocity, max_velocity)
     vy = numpy.clip(vy, -max_velocity, max_velocity)
     
@@ -157,12 +150,6 @@ def estimate_local_motion(window_events, num_blocks=10, max_velocity=50.0):
 def warp_window_events(window_events, width, height, vx, vy, max_dimension=2048):
     """
     Warp events within a window with strict size limits.
-    
-    Args:
-        window_events: Events to warp
-        width, height: Original dimensions
-        vx, vy: Velocity in px/s
-        max_dimension: Maximum allowed dimension (safety limit)
     """
     if len(window_events) == 0:
         return window_events, width, height
@@ -173,38 +160,29 @@ def warp_window_events(window_events, width, height, vx, vy, max_dimension=2048)
     warped_events["t"] = window_events["t"]
     warped_events["on"] = window_events["on"]
     
-    # Calculate displacement relative to center time
-    time_offset = (window_events["t"] - t_center) / 1e6  # seconds
+    time_offset = (window_events["t"] - t_center) / 1e6
     
-    # Apply warping
     warped_x = window_events["x"] - (vx * time_offset)
     warped_y = window_events["y"] - (vy * time_offset)
     
-    # Find bounds
     x_min, x_max = warped_x.min(), warped_x.max()
     y_min, y_max = warped_y.min(), warped_y.max()
     
-    # Shift to positive coordinates
     warped_x = warped_x - x_min
     warped_y = warped_y - y_min
     
-    # Calculate new dimensions
     new_width = int(numpy.ceil(x_max - x_min)) + 1
     new_height = int(numpy.ceil(y_max - y_min)) + 1
     
-    # Safety check - limit maximum size
     if new_width > max_dimension or new_height > max_dimension:
         print(f"  WARNING: Warped size too large ({new_width}x{new_height}), skipping warp")
-        # Return original events without warping
         warped_events["x"] = window_events["x"]
         warped_events["y"] = window_events["y"]
         return warped_events, width, height
     
-    # Assign warped coordinates
     warped_events["x"] = warped_x.astype(numpy.int16)
     warped_events["y"] = warped_y.astype(numpy.int16)
     
-    # Filter valid events
     valid_mask = (
         (warped_events["x"] >= 0) & 
         (warped_events["x"] < new_width) &
@@ -216,7 +194,7 @@ def warp_window_events(window_events, width, height, vx, vy, max_dimension=2048)
 
 
 def accumulate_window_to_frame(window_events, width, height):
-    """Accumulate events from a single window into a frame."""
+    """Accumulate events into frame with Y-flip for display."""
     frame = numpy.zeros((height, width), dtype=numpy.float32)
     
     for event in window_events:
@@ -244,42 +222,57 @@ def enhance_frame(frame, gaussian_sigma=1.5, gamma=0.7):
     if frame.max() == 0:
         return numpy.zeros_like(frame, dtype=numpy.uint8)
     
-    # Gaussian smoothing
     smoothed = ndimage.gaussian_filter(frame, sigma=gaussian_sigma)
-    
-    # Normalize
     normalized = smoothed / smoothed.max() if smoothed.max() > 0 else smoothed
-    
-    # Apply gamma correction
     enhanced = numpy.power(normalized, gamma)
-    
-    # Convert to uint8
     final = (enhanced * 255).astype(numpy.uint8)
     
     return final
 
 
-def count_bright_spots(frame, threshold_percentile=98.0):
-    """Count bright spots above threshold."""
-    if frame.max() == 0:
-        return 0
+def detect_stars_in_pixel_space(enhanced_frame, frame_width, frame_height, threshold_percentile=98.0):
+    """
+    Detect stars and return coordinates in pixel space (sensor optical frame).
     
-    non_zero = frame[frame > 0]
+    Returns:
+        stars_data: List of [id, x_pixel, y_pixel] where coordinates are in sensor space
+        num_stars: Number of stars detected
+    """
+    if enhanced_frame.max() == 0:
+        return [], 0
+    
+    non_zero = enhanced_frame[enhanced_frame > 0]
     if len(non_zero) == 0:
-        return 0
+        return [], 0
     
     threshold = numpy.percentile(non_zero, threshold_percentile)
-    binary = (frame > threshold).astype(numpy.uint8)
+    binary = (enhanced_frame > threshold).astype(numpy.uint8)
     
-    num_labels, _, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary, connectivity=8)
     
-    count = 0
+    stars_data = []
+    star_id = 1
+    
     for i in range(1, num_labels):
         area = stats[i, cv2.CC_STAT_AREA]
         if 2 <= area <= 500:
-            count += 1
+            # centroids gives [x, y] in array space
+            # Array space: centroids[i] = [col, row]
+            # We need to convert to pixel space
+            array_x = centroids[i, 0]  # column index
+            array_y = centroids[i, 1]  # row index
+            
+            # Convert to pixel space (sensor optical frame)
+            # Frame was accumulated as: frame[height - 1 - y_pixel, x_pixel]
+            # So: row = height - 1 - y_pixel
+            # Therefore: y_pixel = height - 1 - row
+            pixel_x = float(array_x)
+            pixel_y = float(frame_height - 1 - array_y)
+            
+            stars_data.append([star_id, pixel_x, pixel_y])
+            star_id += 1
     
-    return count
+    return stars_data, len(stars_data)
 
 
 def submit_to_astrometry_api(image_path, timeout_seconds=90):
@@ -290,15 +283,10 @@ def submit_to_astrometry_api(image_path, timeout_seconds=90):
 
     if not api_key:
         print("\nNo API key found.")
-        print("To enable automatic astrometry:")
-        print(f"1. Get free API key from: https://nova.astrometry.net/api_help")
-        print(f"2. Create '{env_file}' file with:")
-        print(f"   astrometry_api_key=YOUR_API_KEY_HERE")
         return None
 
     print("  API key found. Submitting to Astrometry.net...")
     try:
-        # Login
         login_url = 'http://nova.astrometry.net/api/login'
         login_data = {'request-json': json.dumps({'apikey': api_key})}
         response = requests.post(login_url, data=login_data)
@@ -310,7 +298,6 @@ def submit_to_astrometry_api(image_path, timeout_seconds=90):
         session_key = response.json()['session']
         print(f"Logged in successfully")
 
-        # Upload image
         upload_url = 'http://nova.astrometry.net/api/upload'
         upload_data = {
             'request-json': json.dumps({
@@ -327,17 +314,14 @@ def submit_to_astrometry_api(image_path, timeout_seconds=90):
 
         if response.status_code != 200 or response.json()['status'] != 'success':
             print("Upload failed")
-            print(f"Response: {response.text}")
             return None
 
         subid = response.json()['subid']
         print(f"Upload successful. Submission ID: {subid}")
-        print("Waiting for solution (1-5 minutes)...")
+        print("Waiting for solution...")
 
-        # Wait initial time before polling
         time.sleep(5)
 
-        # Poll for results
         max_attempts = 60
         for attempt in range(max_attempts):
             status_url = f'http://nova.astrometry.net/api/submissions/{subid}'
@@ -345,7 +329,6 @@ def submit_to_astrometry_api(image_path, timeout_seconds=90):
             try:
                 response = requests.get(status_url)
             except requests.RequestException:
-                # Network error, continue waiting
                 time.sleep(5)
                 continue
 
@@ -353,8 +336,6 @@ def submit_to_astrometry_api(image_path, timeout_seconds=90):
                 try:
                     result = response.json()
                 except json.JSONDecodeError:
-                    # Response not ready yet, continue waiting
-                    print("Waiting for response...")
                     time.sleep(5)
                     continue
 
@@ -408,14 +389,19 @@ def process_windows_for_trajectory(windows, width, height, folders):
     print("PROCESSING TIME WINDOWS FOR TRAJECTORY")
     print("="*60)
     
-    # Open CSV file at start
     output_csv = os.path.join(folders['results'], 'star_tracker_trajectory.csv')
     csvfile = open(output_csv, 'w', newline='')
-    fieldnames = ['frame_number', 'num_stars', 'stars_data', 'ra_deg', 'dec_deg', 
-                  'scale_arcsec_per_pixel', 'orientation_deg', 'status', 'solve_time_seconds']
+    
+    # CSV headers with frame dimensions
+    fieldnames = ['frame_number', 'num_stars', 'stars_data', 
+                  'frame_width', 'frame_height',
+                  'ra_deg', 'dec_deg', 
+                  'scale_arcsec_per_pixel', 'orientation_deg', 
+                  'status', 'solve_time_seconds']
+    
     writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
     writer.writeheader()
-    csvfile.flush()  # Ensure header is written immediately
+    csvfile.flush()
     
     print(f"Saving results incrementally to: {output_csv}\n")
     
@@ -423,17 +409,19 @@ def process_windows_for_trajectory(windows, width, height, folders):
     
     try:
         for window_idx, (window_events, window_start, window_center) in enumerate(windows):
-            print(f"\nWindow {window_idx + 1}/{len(windows)}")
+            # start indexed from 1 for user-friendliness
+            window_idx = window_idx + 1
+            print(f"\nWindow {window_idx}/{len(windows)}")
             print(f"  Time: {window_center/1e6:.3f}s")
             print(f"  Events: {len(window_events)}")
             
-            # Stage 1: Raw accumulation (no motion compensation)
+            # Stage 1: Raw accumulation
             raw_frame = accumulate_window_to_frame(window_events, width, height)
             raw_path = save_debug_frame(raw_frame, folders['raw_frames'], 
                                         f'window_{window_idx:03d}_raw.png')
             print(f"  Saved raw frame: {os.path.basename(raw_path)}")
             
-            # Stage 2: Estimate and apply motion compensation
+            # Stage 2: Motion compensation
             vx, vy = estimate_local_motion(window_events, num_blocks=10, max_velocity=20.0)
             print(f"  Motion: vx={vx:.3f}, vy={vy:.3f} px/s")
             
@@ -454,22 +442,19 @@ def process_windows_for_trajectory(windows, width, height, folders):
             cv2.imwrite(enhanced_path, enhanced)
             print(f"  Saved enhanced frame: {os.path.basename(enhanced_path)}")
             
-            # Count stars
-            num_stars = count_bright_spots(enhanced, threshold_percentile=98.0)
+            # Stage 4: Detect stars in pixel space
+            stars_data, num_stars = detect_stars_in_pixel_space(
+                enhanced, new_width, new_height, threshold_percentile=98.0
+            )
             print(f"  Stars detected: {num_stars}")
             
-            # Collect star data
-            stars_data = []
-            if num_stars > 0:
-                non_zero_coords = numpy.argwhere(enhanced > numpy.percentile(enhanced, 98))
-                for i, (y, x) in enumerate(non_zero_coords[:num_stars]):
-                    stars_data.append([i + 1, float(x), float(y)])
-            
-            # Submit to API if enough stars
+            # Prepare result dictionary with frame dimensions
             result_dict = {
                 'frame_number': window_idx,
                 'num_stars': num_stars,
                 'stars_data': json.dumps(stars_data),
+                'frame_width': new_width,
+                'frame_height': new_height,
                 'ra_deg': None,
                 'dec_deg': None,
                 'scale_arcsec_per_pixel': None,
@@ -478,6 +463,7 @@ def process_windows_for_trajectory(windows, width, height, folders):
                 'solve_time_seconds': None
             }
             
+            # Submit to API if enough stars
             if num_stars >= 5:
                 print(f"  Submitting to API...")
                 start_time = time.time()
@@ -501,34 +487,15 @@ def process_windows_for_trajectory(windows, width, height, folders):
             else:
                 print(f"  ⊘ SKIPPED: Insufficient stars ({num_stars} < 5)")
             
-            # Add to trajectory list
             trajectory.append(result_dict)
-            
-            # Write this result to CSV immediately
             writer.writerow(result_dict)
-            csvfile.flush()  # Force write to disk
+            csvfile.flush()
             
     finally:
-        # Close CSV file
         csvfile.close()
         print(f"\nCSV file closed: {output_csv}")
     
     return trajectory
-def save_trajectory_to_csv(trajectory, folders):
-    """Save trajectory data to CSV."""
-    output_csv = os.path.join(folders['results'], 'star_tracker_trajectory.csv')
-    
-    with open(output_csv, 'w', newline='') as csvfile:
-        fieldnames = ['window', 'time_us', 'time_s', 'num_stars', 'ra_deg', 'dec_deg', 
-                     'scale', 'orientation_deg', 'status']
-        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-        writer.writeheader()
-        
-        for point in trajectory:
-            writer.writerow(point)
-    
-    print(f"\nTrajectory saved to: {output_csv}")
-    return output_csv
 
 
 def plot_trajectory(trajectory, folders):
@@ -541,12 +508,11 @@ def plot_trajectory(trajectory, folders):
         print("  No successful solutions to plot")
         return
     
-    times = [p['time_s'] for p in success_points]
+    times = [i for i, p in enumerate(success_points)]
     ras = [p['ra_deg'] for p in success_points]
     decs = [p['dec_deg'] for p in success_points]
     orientations = [p['orientation_deg'] for p in success_points]
     
-    # Time series plot
     fig, axes = plt.subplots(3, 1, figsize=(12, 10))
     
     axes[0].plot(times, ras, 'o-', linewidth=2, markersize=8)
@@ -559,7 +525,7 @@ def plot_trajectory(trajectory, folders):
     axes[1].grid(True, alpha=0.3)
     
     axes[2].plot(times, orientations, 'o-', linewidth=2, markersize=8, color='green')
-    axes[2].set_xlabel('Time (s)', fontsize=12)
+    axes[2].set_xlabel('Frame Number', fontsize=12)
     axes[2].set_ylabel('Orientation (deg)', fontsize=12)
     axes[2].grid(True, alpha=0.3)
     
@@ -570,7 +536,6 @@ def plot_trajectory(trajectory, folders):
     print(f"  Trajectory plot saved to: {output_path}")
     plt.close()
     
-    # Sky path plot
     fig, ax = plt.subplots(figsize=(10, 8))
     scatter = ax.scatter(ras, decs, c=times, cmap='viridis', s=100, edgecolors='black')
     ax.plot(ras, decs, 'k--', alpha=0.3, linewidth=1)
@@ -579,7 +544,7 @@ def plot_trajectory(trajectory, folders):
     ax.set_title('Sky Path (RA vs DEC)', fontsize=14, fontweight='bold')
     ax.grid(True, alpha=0.3)
     cbar = plt.colorbar(scatter, ax=ax)
-    cbar.set_label('Time (s)', fontsize=11)
+    cbar.set_label('Frame Number', fontsize=11)
     
     output_path = os.path.join(folders['results'], 'sky_path.png')
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
@@ -590,36 +555,24 @@ def plot_trajectory(trajectory, folders):
 def main():
     """Main execution function."""
     print("="*60)
-    print("STAR TRACKER - REAL-TIME TRAJECTORY WITH DEBUG")
+    print("STAR TRACKER - REAL-TIME TRAJECTORY")
     print("="*60)
 
-    # Configuration
     WINDOW_DURATION_MS = 1000
     OVERLAP_MS = 500
 
-    # Step 1: Download dataset
     stars_path, dataset_dir = download_dataset()
-
-    # Step 2: Create output folders
     folders = create_output_folders(dataset_dir)
-
-    # Step 3: Load event stream
     events, width, height = load_event_stream(stars_path)
-
-    # Step 4: Split into time windows
     windows = split_events_into_time_windows(
         events, 
         window_duration_ms=WINDOW_DURATION_MS,
         overlap_ms=OVERLAP_MS
     )
 
-    # Step 5: Process each window (CSV saved incrementally inside)
     trajectory = process_windows_for_trajectory(windows, width, height, folders)
-
-    # Step 6: Plot trajectory (if any successful results)
     plot_trajectory(trajectory, folders)
 
-    # Print summary
     print("\n" + "="*60)
     print("TRAJECTORY ANALYSIS COMPLETE!")
     print("="*60)
@@ -635,6 +588,7 @@ def main():
     print(f"  Enhanced frames: {folders['enhanced_frames']}")
     print(f"  Results: {folders['results']}")
     print("="*60)
+
 
 if __name__ == "__main__":
     main()

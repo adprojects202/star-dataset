@@ -19,21 +19,8 @@ def test_solve_with_image():
     """Test the /solve endpoint with a sample image."""
     print("Testing /solve endpoint with image...")
 
-    # Create a simple test image with some bright spots (simulated stars)
-    img_array = np.zeros((640, 480), dtype=np.uint8)
-
-    # Add some "stars" (bright spots)
-    stars = [
-        (100, 100), (200, 150), (300, 200), (400, 250),
-        (150, 300), (250, 350), (350, 400), (100, 450)
-    ]
-
-    for x, y in stars:
-        # Create a small bright region for each star
-        for dx in range(-2, 3):
-            for dy in range(-2, 3):
-                if 0 <= x+dx < 480 and 0 <= y+dy < 640:
-                    img_array[y+dy, x+dx] = 255
+    # load image into numpy array dataset\output\3_enhanced_frames\window_003_enhanced.png
+    img_array = np.array(Image.open('dataset\\output\\3_enhanced_frames\\window_003_enhanced.png'))
 
     # Convert to base64
     img = Image.fromarray(img_array)
@@ -92,7 +79,6 @@ if __name__ == '__main__':
     try:
         test_health()
         test_solve_with_image()
-        test_solve_with_stars()
 
         print("="*60)
         print("ALL TESTS COMPLETED")
